@@ -1,6 +1,7 @@
 # Copyright Modal Labs 2022
 import asyncio
 import functools
+import hashlib
 import inspect
 import re
 import sys
@@ -8,11 +9,14 @@ import time
 import typing
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, get_args
 
 import click
 from click import ClickException
 from typing_extensions import TypedDict
+
+from modal_version import __version__ as sdk_version
 
 from .._environments import ensure_env
 from ..app import App, LocalEntrypoint
@@ -23,6 +27,7 @@ from ..functions import Function
 from ..output import OutputManager
 from ..runner import DEPLOYMENT_STRATEGY_TYPE, deploy_app, run_app
 from ..serving import serve_app
+from ._deploy_fingerprint import cache_matches, deployment_fingerprint, save_fingerprint
 from ._help import ModalCommand, ModalGroup, _consume_global_options, _global_option_token_length
 from .import_refs import (
     CLICommand,
@@ -572,6 +577,19 @@ def run(
     default=False,
     hidden=True,
 )
+@click.option(
+    "--fingerprint-cache",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Experimental: skip a repeated deploy when selected local files are unchanged.",
+)
+@click.option(
+    "--fingerprint-input",
+    type=click.Path(exists=True, dir_okay=False, readable=True, path_type=Path),
+    multiple=True,
+    help="Additional file affecting the deployment; repeat for each dependency.",
+)
+@click.option("--force-deploy", is_flag=True, default=False, help="Ignore a matching local fingerprint.")
 def deploy(
     app_ref: str,
     name: str = "",
@@ -582,6 +600,9 @@ def deploy(
     timestamps: bool = False,
     strategy: str = "rolling",
     staged: bool = False,
+    fingerprint_cache: Path | None = None,
+    fingerprint_input: tuple[Path, ...] = (),
+    force_deploy: bool = False,
 ):
     """Deploy a Modal application.
 
@@ -612,6 +633,38 @@ def deploy(
             "modal deploy ... --name=some-name"
         )
 
+    current_fingerprint = None
+    if fingerprint_cache is None and (fingerprint_input or force_deploy):
+        raise click.ClickException("--fingerprint-input and --force-deploy require --fingerprint-cache")
+    if fingerprint_cache is not None:
+        if use_module_mode or not import_ref.file_or_module.endswith(".py"):
+            raise click.ClickException("The experimental fingerprint cache currently requires a .py file reference")
+        if stream_logs or staged:
+            raise click.ClickException("The experimental fingerprint cache does not support --stream-logs or --staged")
+        selected_paths = (Path(import_ref.file_or_module), *fingerprint_input)
+        if fingerprint_cache.resolve() in {path.resolve() for path in selected_paths}:
+            raise click.ClickException("The fingerprint cache cannot overwrite a deployment input")
+        token_id = config["token_id"]
+        if not token_id:
+            raise click.ClickException("The experimental fingerprint cache requires a Modal API token profile")
+        context = {
+            "app_ref": app_ref,
+            "name": name,
+            "environment": env or "",
+            "tag": tag,
+            "strategy": strategy,
+            "server_url": config["server_url"],
+            "token_scope": hashlib.sha256(token_id.encode("utf-8")).hexdigest(),
+            "sdk_version": sdk_version,
+        }
+        try:
+            current_fingerprint = deployment_fingerprint(selected_paths, context)
+        except OSError as error:
+            raise click.ClickException(f"Cannot fingerprint deployment input: {error}") from error
+        if not force_deploy and cache_matches(fingerprint_cache, current_fingerprint):
+            click.echo("Deployment skipped by local fingerprint cache (no deployment API call).")
+            return
+
     res = deploy_app(
         app,
         name=name,
@@ -620,6 +673,15 @@ def deploy(
         deployment_strategy=strategy,
         staged=staged,
     )
+
+    if current_fingerprint is not None and fingerprint_cache is not None:
+        try:
+            save_fingerprint(fingerprint_cache, current_fingerprint)
+        except OSError as error:
+            click.echo(
+                f"Warning: deployment succeeded, but the local fingerprint cache could not be saved: {error}",
+                err=True,
+            )
 
     if stream_logs:
         # stream_app_logs is defined in cli/utils.py, which does not get type stubs

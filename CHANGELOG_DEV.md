@@ -7,6 +7,7 @@ During a release, the notes are moved to the language-specific `CHANGELOG.md` fi
 ## Python
 
 - Added an opt-in experimental `modal deploy --fingerprint-cache` shortcut for selected local files. A matching cache skips the deployment API call; users must include every input that can change the deployed app and use `--force-deploy` after remote changes.
+- Added an experimental `ast_function` decorator that mounts a reduced Python module and recursively discovered local imports. The CLI fingerprint cache uses those artifact digests when all functions in a simple App use this decorator.
 - Added `Sandbox.logs`(/docs/sdk/py/latest/Sandbox#logs) namespace to retrieve Sandbox entrypoint logs directly from the SDK. The namespace has two different methods, allowing you `fetch()` logs from a specific date/time range, or `tail()` the most recent logs.
 - Added support for setting the default member Role when creating Restricted Environments through the Python SDK and CLI.
 - The `modal` CLI now accepts a global `--profile` option for simpler ad hoc profile selection.

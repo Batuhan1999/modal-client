@@ -3,6 +3,7 @@ import asyncio
 import functools
 import hashlib
 import inspect
+import json
 import re
 import sys
 import time
@@ -641,7 +642,24 @@ def deploy(
             raise click.ClickException("The experimental fingerprint cache currently requires a .py file reference")
         if stream_logs or staged:
             raise click.ClickException("The experimental fingerprint cache does not support --stream-logs or --staged")
-        selected_paths = (Path(import_ref.file_or_module), *fingerprint_input)
+        ast_entries = getattr(app, "_experimental_ast_fingerprints", None)
+        if ast_entries:
+            state = app._local_state
+            if (
+                set(ast_entries) != set(state.functions)
+                or state.classes
+                or state.image_default is not None
+                or state.secrets_default
+                or state.volumes_default
+                or state.tags
+            ):
+                raise click.ClickException(
+                    "The experimental AST fingerprint requires all functions to use ast_function "
+                    "and an App without custom defaults, classes, or tags"
+                )
+            selected_paths = fingerprint_input
+        else:
+            selected_paths = (Path(import_ref.file_or_module), *fingerprint_input)
         if fingerprint_cache.resolve() in {path.resolve() for path in selected_paths}:
             raise click.ClickException("The fingerprint cache cannot overwrite a deployment input")
         token_id = config["token_id"]
@@ -657,6 +675,8 @@ def deploy(
             "token_scope": hashlib.sha256(token_id.encode("utf-8")).hexdigest(),
             "sdk_version": sdk_version,
         }
+        if ast_entries:
+            context["ast_artifacts"] = json.dumps(ast_entries, sort_keys=True, separators=(",", ":"))
         try:
             current_fingerprint = deployment_fingerprint(selected_paths, context)
         except OSError as error:

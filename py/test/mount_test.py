@@ -1,10 +1,12 @@
 # Copyright Modal Labs 2022
+import asyncio
 import hashlib
 import os
 import platform
 import pytest
 import random
 import re
+import threading
 from math import ceil
 from pathlib import Path, PurePosixPath
 
@@ -137,6 +139,41 @@ def test_mount_from_name_double_resolve(servicer, client, tmp_path):
         ctx.calls.clear()
         wrapped_test(mount, client)  # type: ignore
         assert len(ctx.calls) == 0
+
+
+def test_concurrent_mount_loads_do_not_scale_threads_with_mount_count(servicer, client, tmp_path, monkeypatch):
+    n_mounts = 40
+    mounts = []
+    for i in range(n_mounts):
+        mount_dir = tmp_path / f"mount_{i}"
+        mount_dir.mkdir()
+        for j in range(20):
+            (mount_dir / f"file_{j}.py").write_text(f"VALUE = {i * 100 + j}\n")
+        mounts.append(Mount._from_local_dir(mount_dir, remote_path=f"/data_{i}"))
+
+    baseline = peak = threading.active_count()
+    original_start = threading.Thread.start
+
+    def recording_start(thread):
+        nonlocal peak
+        original_start(thread)
+        peak = max(peak, threading.active_count())
+
+    monkeypatch.setattr(threading.Thread, "start", recording_start)
+
+    @synchronizer.wrap
+    async def load_all(mounts, client):
+        resolver = Resolver()
+        async with TaskContext() as tc:
+            load_context = LoadContext(client=client, task_context=tc)
+            await asyncio.gather(*(resolver.load(mount, load_context) for mount in mounts))
+
+    load_all(mounts, client)  # type: ignore
+
+    assert all(mount.object_id.startswith("mo-") for mount in mounts)
+    # Checksumming and the event loop's default executor are each bounded by this many threads.
+    max_workers = min(32, (os.cpu_count() or 1) + 4)
+    assert peak - baseline <= 2 * max_workers
 
 
 def test_create_mount_file_errors(servicer, tmp_path, client):

@@ -2,9 +2,11 @@
 import abc
 import asyncio
 import concurrent.futures
+import contextlib
 import dataclasses
 import os
 import re
+import threading
 import time
 import typing
 import warnings
@@ -37,6 +39,40 @@ from .file_pattern_matcher import FilePatternMatcher
 
 ROOT_DIR: PurePosixPath = PurePosixPath("/root")
 MOUNT_PUT_FILE_CLIENT_TIMEOUT = 10 * 60  # 10 min max for transferring files
+
+
+class _SharedChecksumExecutor:
+    """Thread pool shared by all mounts that are checksumming files at the same time.
+
+    A pool per mount would start threads in proportion to the number of mounts loaded concurrently,
+    which can exhaust the process's thread limit for apps with many distinct mounts.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._executor: concurrent.futures.ThreadPoolExecutor | None = None
+        self._users = 0
+
+    @contextlib.contextmanager
+    def use(self) -> Generator[concurrent.futures.ThreadPoolExecutor, None, None]:
+        with self._lock:
+            if self._executor is None:
+                self._executor = concurrent.futures.ThreadPoolExecutor()
+            executor = self._executor
+            self._users += 1
+        try:
+            yield executor
+        finally:
+            with self._lock:
+                self._users -= 1
+                last_user = self._users == 0
+                if last_user:
+                    self._executor = None
+            if last_user:
+                executor.shutdown()
+
+
+_checksum_executor = _SharedChecksumExecutor()
 
 # Supported releases and versions for python-build-standalone.
 #
@@ -480,7 +516,7 @@ class _Mount(_Object, type_prefix="mo"):
         batch_size: int,
     ) -> AsyncGenerator[FileUploadSpec, None]:
         loop = asyncio.get_event_loop()
-        with concurrent.futures.ThreadPoolExecutor() as e:
+        with _checksum_executor.use() as e:
             all_files = await loop.run_in_executor(e, _select_files, entries)
             logger.debug(f"Computing checksums for {len(all_files)} files using default max workers")
 

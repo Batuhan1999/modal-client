@@ -6,6 +6,7 @@ Draft releases notes should be added as part of the PR introducing the change. D
 
 ## Python
 
+- Fixed a bug where Apps with many distinct local mounts (for example, `Image.add_local_dir` per Function) started threads in proportion to the number of mounts while uploading them, which could fail with `RuntimeError: can't start new thread`. Mounts uploaded at the same time now share one bounded thread pool.
 - Added `modal endpoint info` command for displaying information such as an endpoint's deployment status, URL, and model id. We've also added `modal endpoint stats` to inspect performance metrics for an Endpoint over a selected time window and `modal endpoint logs` for displaying logs for an Endpoint.
 
 ## JS
